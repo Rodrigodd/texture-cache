@@ -2,19 +2,38 @@
 //! GPU. This is used to cache textures that are rendered at runtime and change constantly, like
 //! glyph text rendering.
 //!
-//! # Example
+//! ## Usage
+//!
+//! Create a [`LruTextureCache`] and add rects by passing mutable slice of [`RectEntry`] to the
+//! method [`cache_rects`](LruTextureCache::cache_rects). A stored [`Rect`] can be queried from the
+//! cache by passing it `key` to the method `get_rect`. `Rect` and `RectEntry` can contain
+//! arbitrary data that could be useful for rendering from/to the texture cache.
+//!
+//! After passing the slice to `cache_rects`, it will be reorder so that it start with every rect
+//! that was added to the cache. See [`LruTextureCache::cache_rects`] for details.
+//!
+//! ## Example
 //!
 //! ```rust
+//! # fn main() -> Result<(), texture_cache::CacheErr> {
 //! use texture_cache::{LruTextureCache, RectEntry};
 //!
-//! let mut rects = vec![RectEntry { width: 20, height: 20, key: "my_rect", value: (), entry_data: ()}];
+//! let mut rects = vec![RectEntry {
+//!     width: 20,
+//!     height: 20,
+//!     key: "my_rect",
+//!     value: (),
+//!     entry_data: (),
+//! }];
 //! let mut cache = LruTextureCache::new(256, 256);
 //! let result = cache.cache_rects(&mut rects)?;
 //!
-//! for rect in rects[0..result.len()] {
+//! for rect in &rects[0..result.len()] {
 //!     let cached_rect = cache.get_rect(&rect.key);
 //!     // Draw the rect to the texture
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 #![warn(missing_docs)]
@@ -212,13 +231,13 @@ pub struct Rect<V> {
 
 struct Row<V> {
     /// The age of the row since the last time it was used to cache a rect.  Increase by one for
-    /// ever call to cache_rects. Reset to 0 when store a rect from `cache_rects`.
+    /// ever call to `cache_rects`. Reset to 0 when store a rect from `cache_rects`.
     age: u8,
     /// The position of the top of the row
     top: u32,
     /// The height of the row
     height: u32,
-    /// The space that is not occuped to the right of the last stored rect.
+    /// The space that is not occupied to the right of the last stored rect.
     free_space: u32,
     /// The rects stored in this row
     pub rects: Vec<Rect<V>>,
@@ -252,32 +271,12 @@ pub struct RectEntry<K: Hash + Eq + Clone, V: Clone, D> {
     pub height: u32,
     /// The key that will be mapped to the cached rect.
     pub key: K,
-    /// A value wich will be associated with the cached rect.
+    /// A value which will be associated with the cached rect.
     pub value: V,
     /// A value it will be associated with this rect entry. This is not stored in the cache, but it
-    /// is used to do operations right after storing it.
+    /// is used to do operations with this entry right after adding it.
     pub entry_data: D,
 }
-
-// pub trait CacheContext<K: Hash + Eq + Clone, V, D> {
-//     fn dimensions(key: K) -> (u32, u32);
-//     fn value(key: K) -> V;
-//     fn data(key: K) -> D;
-// }
-// struct MyContext<'a> { fonts: &'a [Font], pad: bool  }
-// impl<'a> CacheContext<LossyGlyphInfo, (u32, u32), GlyphBounds> for MyContext<'a> {
-//     fn dimensions(key: LossyGlyphInfo) -> (u32, u32) {
-//         let b = self.fonts[key.font_id].get_bounds(key.glyph_id);
-//         (b.width() + self.pad as u8 *2, b.height() + self.pad as u8 * 2)
-//     }
-//     fn value(key: LossyGlyphInfo) -> V {
-//         let b = self.fonts[key.font_id].get_bounds(key.glyph_id);
-//         (b.width(), b.height())
-//     }
-//     fn data(key: LossyGlyphInfo) -> GlyphBounds {
-//         self.fonts[key.font_id].get_bounds(key.glyph_id)
-//     }
-// }
 
 type RowIndex = u32;
 type RectIndex = u32;
@@ -292,11 +291,23 @@ pub enum Cached {
     /// number of rects that was added to the cache.
     Changed(usize),
     /// Added all rects into the cache, by clearing all rects from previous queues. Contains the
-    /// number of rects that was added to the cache.
+    /// number of rects contained in the cache.
     Cleared(usize),
 }
+impl Cached {
+    /// Return the number of rects that was added to the cached.
+    ///
+    /// This includes rects that was reordered, in the cause of [Cached::Cleared].
+    pub fn len(&self) -> usize {
+        match *self {
+            Self::Added(len) => len,
+            Self::Changed(len) => len,
+            Self::Cleared(len) => len,
+        }
+    }
+}
 
-/// Reason of cache fail, returned from `cache_rects`.
+/// Reason of cache failure.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CacheErr {
     /// At least one of the queued rects is too big to fit into the cache by itself. Contains the
@@ -305,6 +316,15 @@ pub enum CacheErr {
     /// Not all of the requested glyphs fit into the cache, even after clearing all previous cached
     /// rects. Contains the number of rects that was added to the cache.
     DontFit(usize),
+}
+impl CacheErr {
+    /// Return the number of rects that was added to the cached.
+    pub fn len(&self) -> usize {
+        match *self {
+            Self::RectTooLarge(len) => len,
+            Self::DontFit(len) => len,
+        }
+    }
 }
 
 #[derive(PartialEq, Eq, Debug)]
@@ -317,23 +337,24 @@ enum AddRectResult {
 
 /// A LRU texture cache to cache rects in a texture.
 ///
-/// This works by dividing the texture in rows. When adding a rect it is check if it fit in any of
-/// the existing rows. If not, a new row is created, with the height of the added rect. If there is
-/// no space for new rows, a range of unused rows with a height that fit the rect is remove, and a
-/// new row that fit the rect is added. If no row is find, the entire cache is cleared.
+///## Algorithm
+/// This works by dividing the texture in rows. When adding a rect it check if it fit in any of the
+/// existing rows. If not, a new row is created, with the height of the added rect. If there is no
+/// space for new rows, a range of unused rows with a height that fit the rect is remove, and a new
+/// row that fit the rect is added. If no row is find, the entire cache is cleared.
 ///
-/// When adding multiple rects, all rows that contains any of the added rects are marked as used,
-/// and the remain are the unused ones.
+/// When adding multiple rects, all rows that contains any of the already added rects are marked as
+/// used, and the remain are the unused ones.
 pub struct LruTextureCache<K: Hash + Eq, V> {
     /// The width of the texture.
     width: u32,
     /// The height of the texture.
     height: u32,
-    /// Alocated rows in the cache.
+    /// Alllocated rows in the cache.
     rows: Vec<Row<V>>,
     /// A map from a rect key to the row and index it is stored.
     key_to_row: HashMap<K, (RowIndex, RectIndex)>,
-    /// Free space below the bottom rom.
+    /// Free space below the bottom row.
     free_space: u32,
 }
 impl<K: Hash + Eq + Copy + 'static, V: Clone> LruTextureCache<K, V> {
@@ -357,8 +378,10 @@ impl<K: Hash + Eq + Copy + 'static, V: Clone> LruTextureCache<K, V> {
         self.height
     }
 
-    /// The height of the occuped height in the cache. Cached rects are placed at the top, and
-    /// grows to bottom, this is the position of the bottom of the lowest rect.
+    /// The height of the occupied area of the cache.
+    ///
+    /// Cached rects are placed at the top, and grows to bottom, this is the position of the bottom
+    /// of the lowest rect.
     pub fn min_height(&self) -> u32 {
         self.height - self.free_space
     }
@@ -386,8 +409,8 @@ impl<K: Hash + Eq + Copy + 'static, V: Clone> LruTextureCache<K, V> {
         self.key_to_row.contains_key(key)
     }
 
-    /// partition the vector in uncached and cached, and return the index of partition. Uncached
-    /// rects will add a dummy value to the key_to_row map.
+    /// partition the given slice in uncached and cached, and return the index of partition.
+    /// Uncached rects will add a dummy value to the `key_to_row` map.
     fn partition_cached<D>(&mut self, rects: &mut [RectEntry<K, V, D>]) -> usize {
         fn partition<T, F: FnMut(&T) -> bool>(slice: &mut [T], mut f: F) -> usize {
             let mut l = 0;
@@ -410,9 +433,14 @@ impl<K: Hash + Eq + Copy + 'static, V: Clone> LruTextureCache<K, V> {
         })
     }
 
-    /// Cache a group of rects. If return `Ok`, it is garanted that each one of the given rects
-    /// will be present in the cache after this call, but any rects from previous calls could have
-    /// been removed.
+    /// Cache the given slice of rects.
+    ///
+    /// The given slice of rects is reorder so that it start with every rect that was added to the
+    /// cache. This way you can iterate over them by subslicing `rects`  (`rects[0..len]`, where
+    /// `len` is [`Cached::len`] or [`CacheErr::len`]) and draw them to the texture cache.
+    ///
+    /// If return `Ok`, it is guaranteed that each one of the given rects will be present in the
+    /// cache after this call, but any rects from previous calls could have been removed.
     #[must_use]
     pub fn cache_rects<D>(&mut self, rects: &mut [RectEntry<K, V, D>]) -> Result<Cached, CacheErr> {
         // Partition the vector in uncached and cached. Be aware of the dummy values.
