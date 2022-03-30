@@ -1,7 +1,13 @@
 [package]
 name = "texture-cache"
+description = "A LRU texture cache for caching many small textures in a single big GPU texture"
 version = "0.1.0"
 edition = "2018"
+repository = "https://github.com/Rodrigodd/texture-cache"
+readme = "README.md"
+license = "MIT or Apache 2.0"
+keywords = ["cache", "texture", "atlas", "rendering"]
+categories = ["caching", "algorithms"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
