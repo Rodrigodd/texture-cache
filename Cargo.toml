@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2018"
 repository = "https://github.com/Rodrigodd/texture-cache"
 readme = "README.md"
-license = "MIT or Apache 2.0"
+license = "MIT OR Apache-2.0"
 keywords = ["cache", "texture", "atlas", "rendering"]
 categories = ["caching", "algorithms"]
 
