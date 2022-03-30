@@ -448,7 +448,7 @@ impl<K: Hash + Eq + Copy + 'static, V: Clone> LruTextureCache<K, V> {
         // sort uncached by decresing height
         rects[..s].sort_unstable_by_key(|x| !x.height);
 
-        // Update the use age of the rows for this batch. Uncached rects will mark the rows when added.
+        // Update the `age` of the rows for this batch. Uncached rects will mark the rows when added.
 
         for row in &mut self.rows {
             row.age = row.age.saturating_add(1);
@@ -504,7 +504,8 @@ impl<K: Hash + Eq + Copy + 'static, V: Clone> LruTextureCache<K, V> {
                 for (r, rect) in rects[..s].iter().enumerate() {
                     match self.add_rect(rect.width, rect.height, rect.key, rect.value.clone()) {
                         Added => {}
-                        ClearedRows | TooLarge => unreachable!(),
+                        ClearedRows => unreachable!("there are no unused rows"),
+                        TooLarge => unreachable!("too large rects would have failed already"),
                         NoRowToFit => {
                             // clear dummy key_to_row values
                             for rect in &rects[r..s] {
